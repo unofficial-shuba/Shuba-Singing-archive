@@ -1350,6 +1350,10 @@ body.is-paused .song.playing .no::before { animation: none; --e1: 25%; --e2: 25%
 /* 曲のカード：YouTube・Apple Music のリンクは、アーティスト名と種類タグの後ろに（日付の行をすっきりさせる） */
 .ext-ics { display: inline-flex; align-items: baseline; gap: 12px; flex: none; margin-left: 6px; }
 .ext-ics .am-link { font-size: 12px; }
+/* リンクが入りきらないときは、カードからはみ出さずに次の行へ折り返す */
+.songrow-main .s-info { flex-wrap: wrap; row-gap: 4px; }
+.songrow-main .s-info .s-artist { flex: 0 1 auto; }
+.ext-ics { flex: 0 1 auto; flex-wrap: wrap; row-gap: 4px; margin-left: 0; max-width: 100%; }
 /* データベースの曲のカード表示：広い画面では2列に並べる（1位・2位が左右に並ぶ順）。カード以外の部分は横幅いっぱいのまま */
 @media (min-width: 1200px) {
   #list:has(> .songrow) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; align-items: start; }
@@ -5238,8 +5242,13 @@ window.addEventListener("error", (e => {
     }
     return null;
   }
+  let lastSeek = null;
   function seek(videoId, t, fresh) {
     hideStuck();
+    lastSeek = {
+      videoId: videoId,
+      t: t
+    };
     try {
       if (loadedVideo === videoId && !fresh) {
         ytPlayer.seekTo(t, true);
@@ -5298,10 +5307,14 @@ window.addEventListener("error", (e => {
     clearTimeout(ytWatchTimer);
     const since = Date.now(), key = videoId + "@" + t;
     ytWatchTimer = setTimeout((() => {
-      if (document.hidden || !current || loadedVideo !== videoId) return;
+      if (!current || loadedVideo !== videoId) return;
       const alive = ytEventAt >= since && (ytState === 1 || ytState === 3 || ytState === 2);
       if (alive) return;
       if (ytEventAt >= since && ytState !== -1 && ytState !== 5) return;
+      if (document.hidden) {
+        bgFix(videoId, t);
+        return;
+      }
       if (ytAutoFixFor !== key) {
         ytAutoFixFor = key;
         rebuildYT(videoId, t);
@@ -5328,6 +5341,54 @@ window.addEventListener("error", (e => {
       loadYT();
     }
     toast("プレイヤーを読み込み直しました");
+  }
+  let bgFixKey = "", bgFixStep = 0;
+  function bgFix(videoId, t) {
+    const key = videoId + "@" + t;
+    if (bgFixKey !== key) {
+      bgFixKey = key;
+      bgFixStep = 0;
+    }
+    bgFixStep++;
+    if (bgFixStep === 1 && ytPlayer && ytReady) {
+      try {
+        ytPlayer.loadVideoById({
+          videoId: videoId,
+          startSeconds: t
+        });
+        loadedVideo = videoId;
+        watchYT(videoId, t, 8e3);
+        return;
+      } catch (e) {}
+    }
+    if (bgFixStep <= 2) {
+      bgFixStep = 2;
+      ytAutoFixFor = key;
+      rebuildYT(videoId, t);
+    }
+  }
+  function wakeCheck() {
+    if (!current || !autoSwitchAt || !lastSeek || videoEl && document.contains(videoEl)) return;
+    if (ytState === 1 || ytState === 3 || ytState === 0) return;
+    if (ytState === 2 && resumeTries < 2) return;
+    const {videoId: videoId, t: t} = lastSeek;
+    if (!(ytPlayer && ytReady)) {
+      ytAutoFixFor = videoId + "@" + t;
+      rebuildYT(videoId, t);
+      return;
+    }
+    const tt = ytState === 2 && loadedVideo === videoId ? currentTimeNow() : null, at = tt != null && tt > 0 ? Math.floor(tt) : t;
+    try {
+      if (loadedVideo === videoId && ytState !== -1) ytPlayer.playVideo(); else {
+        ytPlayer.loadVideoById({
+          videoId: videoId,
+          startSeconds: at
+        });
+        loadedVideo = videoId;
+      }
+    } catch (e) {}
+    ytAutoFixFor = "";
+    watchYT(videoId, at, 3e3);
   }
   $("screen").addEventListener("click", (e => {
     if (!e.target.closest("[data-yt-retry]") || !current) return;
@@ -5716,6 +5777,7 @@ window.addEventListener("error", (e => {
     if (!document.hidden) {
       lastTick = 0;
       tick();
+      wakeCheck();
     }
   }));
   let ytState = -1;
