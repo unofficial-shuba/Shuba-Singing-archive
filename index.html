@@ -5247,7 +5247,8 @@ window.addEventListener("error", (e => {
     hideStuck();
     lastSeek = {
       videoId: videoId,
-      t: t
+      t: t,
+      at: Date.now()
     };
     try {
       if (loadedVideo === videoId && !fresh) {
@@ -5311,18 +5312,73 @@ window.addEventListener("error", (e => {
       const alive = ytEventAt >= since && (ytState === 1 || ytState === 3 || ytState === 2);
       if (alive) return;
       if (ytEventAt >= since && ytState !== -1 && ytState !== 5) return;
-      if (document.hidden) {
-        bgFix(videoId, t);
-        return;
-      }
-      if (ytAutoFixFor !== key) {
-        ytAutoFixFor = key;
-        rebuildYT(videoId, t);
-        return;
-      }
-      hideStuck();
-      $("screen").insertAdjacentHTML("beforeend", `<button type="button" class="yt-stuck" data-yt-retry>再生が始まらないときは、ここを押して読み込み直す</button>`);
+      const fix = () => {
+        if (!current || loadedVideo !== videoId) return;
+        if (document.hidden) {
+          if (touchDevice) bgFix(videoId, t);
+          return;
+        }
+        if (ytAutoFixFor !== key) {
+          ytAutoFixFor = key;
+          rebuildYT(videoId, t);
+          return;
+        }
+        hideStuck();
+        $("screen").insertAdjacentHTML("beforeend", `<button type="button" class="yt-stuck" data-yt-retry>再生が始まらないときは、ここを押して読み込み直す</button>`);
+      };
+      if (ytState === 1) progressing(1e3, (ok => {
+        const ct = currentTimeNow(), el = (Date.now() - since) / 1e3;
+        if (!(ok && ct != null && ct >= t - 2 && ct <= t + el + 4)) fix();
+      })); else fix();
     }), ms || 6e3);
+  }
+  const touchDevice = (() => {
+    try {
+      return matchMedia("(hover: none) and (pointer: coarse)").matches;
+    } catch (e) {
+      return false;
+    }
+  })();
+  function progressing(ms, cb) {
+    const a = currentTimeNow();
+    setTimeout((() => {
+      const b = currentTimeNow();
+      cb(a != null && b != null && b - a > Math.min(.5, ms / 2500));
+    }), ms);
+  }
+  let stallLastCt = null, stallSince = 0, stallKicks = 0, stallKey = "";
+  function stallWatch(nowMs) {
+    if (!(ytPlayer && ytReady) || ytState !== 1 || !current || videoEl && document.contains(videoEl)) {
+      stallLastCt = null;
+      return;
+    }
+    const ct = currentTimeNow();
+    if (ct == null) return;
+    const key = loadedVideo + "@" + current.streamId + "@" + current.index;
+    if (key !== stallKey) {
+      stallKey = key;
+      stallKicks = 0;
+      stallLastCt = null;
+    }
+    if (stallLastCt == null || Math.abs(ct - stallLastCt) > .05) {
+      stallLastCt = ct;
+      stallSince = nowMs;
+      return;
+    }
+    if (nowMs - stallSince < 6e3 || stallKicks >= 2) return;
+    stallKicks++;
+    stallSince = nowMs;
+    kickYT();
+  }
+  function kickYT() {
+    try {
+      ytPlayer.pauseVideo();
+    } catch (e) {}
+    setTimeout((() => {
+      try {
+        if (ytPlayer && ytReady) ytPlayer.playVideo();
+      } catch (e) {}
+    }), 350);
   }
   function rebuildYT(videoId, t) {
     ytRebuilds++;
@@ -5368,8 +5424,26 @@ window.addEventListener("error", (e => {
     }
   }
   function wakeCheck() {
-    if (!current || !autoSwitchAt || !lastSeek || videoEl && document.contains(videoEl)) return;
-    if (ytState === 1 || ytState === 3 || ytState === 0) return;
+    if (!current || videoEl && document.contains(videoEl)) return;
+    if (ytState === 1 && ytPlayer && ytReady) {
+      progressing(1200, (ok => {
+        if (ok && lastSeek && lastSeek.videoId === loadedVideo && ytEventAt < lastSeek.at) {
+          const ct = currentTimeNow(), el = (Date.now() - lastSeek.at) / 1e3;
+          ok = ct != null && ct >= lastSeek.t - 2 && ct <= lastSeek.t + el + 4;
+        }
+        if (ok || document.hidden || ytState !== 1) return;
+        kickYT();
+        setTimeout((() => progressing(1500, (ok2 => {
+          if (ok2 || document.hidden || !current || !loadedVideo) return;
+          const fresh = lastSeek && lastSeek.videoId === loadedVideo && ytEventAt < lastSeek.at, ct = fresh ? null : currentTimeNow();
+          ytAutoFixFor = "";
+          rebuildYT(loadedVideo, ct != null && ct > 0 ? Math.floor(ct) : lastSeek && lastSeek.videoId === loadedVideo ? lastSeek.t : 0);
+        }))), 1200);
+      }));
+      return;
+    }
+    if (!autoSwitchAt || !lastSeek) return;
+    if (ytState === 3 || ytState === 0) return;
     if (ytState === 2 && resumeTries < 2) return;
     const {videoId: videoId, t: t} = lastSeek;
     if (!(ytPlayer && ytReady)) {
@@ -5715,6 +5789,7 @@ window.addEventListener("error", (e => {
     lastTick = nowMs;
     if (!current) return;
     unstickBuffering(nowMs);
+    stallWatch(nowMs);
     if (document.hidden && autoSwitchAt && nowMs - autoSwitchAt > 5e3 && (ytState === -1 || ytState === 5)) bgResume("stuck");
     const s = db.streams.find((x => x.id === current.streamId));
     if (!s || s.sample) return;
