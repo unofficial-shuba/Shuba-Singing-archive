@@ -324,6 +324,21 @@ body.dbmode .now-title .now-detail, body.dbmode .now-title br { display: none; }
 /* Dialog */
 dialog { border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: var(--ink); width: min(640px, calc(100vw - 32px)); padding: 0; }
 dialog::backdrop { background: rgb(10 8 20 / .5); }
+/* ページの一番下：非公式の一言と「このサイトについて」ボタン */
+.site-foot { margin: 40px auto 8px; padding: 18px 16px 4px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 16px; color: var(--muted); font-size: 12px; text-align: center; }
+.site-foot .btn { font-size: 12px; padding: 5px 14px; color: var(--ink); }
+@media (min-width: 1200px) {
+  body:not(.dbmode) .site-foot { margin-right: calc(var(--pw, 380px) + 24px); }
+  body.dbmode:has(.player:not(.idle)) .site-foot { margin-right: 372px; }
+  body.dbmode.vidbig:has(.player:not(.idle)) .site-foot { margin-right: 576px; }
+}
+.about-dlg { gap: 0; }
+.about-dlg h2 { margin-bottom: 6px; }
+.about-dlg section { padding: 12px 0; border-top: 1px solid var(--line); }
+.about-dlg section:first-of-type { border-top: 0; padding-top: 4px; }
+.about-dlg h3 { margin: 0 0 4px; font-size: 13px; font-weight: 700; color: var(--accent-text); }
+.about-dlg p { margin: 0; font-size: 13.5px; line-height: 1.85; }
+.about-dlg .dlg-foot { padding-top: 12px; }
 .dlg { padding: 20px; display: grid; gap: 14px; }
 .dlg h2 { font-family: var(--font-display); font-weight: 400; font-size: 20px; margin: 0; }
 .field { display: grid; gap: 4px; }
@@ -1498,6 +1513,10 @@ body.dbmode .follow-sw { display: none; }
   <div class="grid">
     <main class="list" id="list"></main>
   </div>
+  <footer class="site-foot">
+    <span>ファンが個人で作っている非公式サイトです</span>
+    <button type="button" class="btn" data-about>このサイトについて</button>
+  </footer>
 </div>
 
 <aside class="player idle" id="player" aria-label="プレイヤー">
@@ -1550,6 +1569,27 @@ body.dbmode .follow-sw { display: none; }
   </div>
 </aside>
 
+<dialog id="aboutDlg" aria-labelledby="aboutTitle">
+  <form class="dlg about-dlg" method="dialog">
+    <h2 id="aboutTitle">このサイトについて</h2>
+    <section>
+      <p>当サイトは、ファンが個人で作っている非公式のデータベースです。カバー株式会社・ホロライブプロダクション、および大空スバルさんご本人とは一切関係ありません。</p>
+    </section>
+    <section>
+      <h3>権利について</h3>
+      <p>動画・サムネイル・ジャケット画像などの権利は、それぞれの権利者に帰属します。動画の再生には、YouTubeの埋め込みプレーヤーを使っています。</p>
+    </section>
+    <section>
+      <h3>掲載している情報について</h3>
+      <p>手作業でまとめた情報のため、正確さは保証できません。誤りに気づいたら教えていただけると助かります。</p>
+    </section>
+    <section>
+      <h3>お問い合わせ</h3>
+      <p>誤りのご指摘や、掲載内容についてのご連絡は、管理者までお願いします。</p>
+    </section>
+    <div class="dlg-foot"><button class="btn" value="close">閉じる</button></div>
+  </form>
+</dialog>
 <dialog id="dlg">
   <form class="dlg" id="form" method="dialog">
     <h2 id="dlgTitle">配信を追加</h2>
@@ -1848,6 +1888,12 @@ window.addEventListener("error", (e => {
   function checkGitHub() {
     callServer("getGitHubStatus").then(renderGh, (() => {}));
   }
+  document.addEventListener("click", (e => {
+    const b = e.target.closest && e.target.closest("[data-about]");
+    if (!b) return;
+    const d = document.getElementById("aboutDlg");
+    if (d && !d.open) d.showModal();
+  }));
   document.addEventListener("click", (e => {
     const btn = e.target.closest && e.target.closest("#ghBanner [data-gh-push]");
     if (!btn) return;
