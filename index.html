@@ -5297,7 +5297,8 @@ window.addEventListener("error", (e => {
     lastSeek = {
       videoId: videoId,
       t: t,
-      at: Date.now()
+      at: Date.now(),
+      ct0: currentTimeNow()
     };
     try {
       if (loadedVideo === videoId && !fresh) {
@@ -5316,13 +5317,35 @@ window.addEventListener("error", (e => {
     watchYT(videoId, t);
   }
   let ytWatchTimer = null, ytRebuilds = 0, ytEventAt = 0;
-  let bufSince = 0, bufTries = 0;
+  let bufSince = 0, bufTries = 0, bufLastCt = null;
   function unstickBuffering(nowMs) {
-    if (ytState !== 3 || !bufSince || !current || !ytReady || !ytPlayer) return;
-    if (nowMs - bufSince < 1e4) return;
+    if (ytState !== 3 || !bufSince || !current || !ytReady || !ytPlayer) {
+      bufLastCt = null;
+      return;
+    }
+    const ct = currentTimeNow();
+    if (ct != null && bufLastCt != null && Math.abs(ct - bufLastCt) > .2) {
+      bufLastCt = ct;
+      bufSince = nowMs;
+      return;
+    }
+    bufLastCt = ct;
+    if (document.hidden && !touchDevice) {
+      bufSince = nowMs;
+      bufLastCt = null;
+      return;
+    }
+    if (nowMs - bufSince < (document.hidden ? 2e4 : 1e4)) return;
     const s = db.streams.find((x => x.id === current.streamId));
     if (!s || !s.videoId) return;
-    let t = seekTarget && seekTarget.streamId === s.id && !seekTarget.arrived ? seekTarget.t : currentTimeNow();
+    const tgt = seekTarget && seekTarget.streamId === s.id && !seekTarget.arrived ? seekTarget : null;
+    const noNews = tgt && lastSeek && ct != null && lastSeek.ct0 != null && Math.abs(ct - lastSeek.ct0) < .2 && Math.abs(ct - tgt.t) >= 3;
+    if (noNews) {
+      if (document.hidden) return;
+      bufSince = nowMs;
+      bufTries = 2;
+    }
+    let t = tgt ? ct != null && ct >= tgt.t - 1 && ct < tgt.end ? ct : tgt.t : ct;
     if (t == null) return;
     t = Math.max(0, Math.floor(t));
     bufSince = nowMs;
@@ -5334,6 +5357,7 @@ window.addEventListener("error", (e => {
       } catch (e) {}
     } else if (bufTries === 1) {
       bufTries = 2;
+      if (document.hidden && !touchDevice) return;
       try {
         ytPlayer.loadVideoById({
           videoId: s.videoId,
@@ -5388,6 +5412,16 @@ window.addEventListener("error", (e => {
       return false;
     }
   })();
+  function progressingSoon(ms, cb) {
+    const a = currentTimeNow(), t0 = Date.now();
+    const step = () => {
+      const b = currentTimeNow();
+      if (a != null && b != null && Math.abs(b - a) > .2) return cb(true);
+      if (Date.now() - t0 >= ms) return cb(false);
+      setTimeout(step, 300);
+    };
+    setTimeout(step, 300);
+  }
   function progressing(ms, cb) {
     const a = currentTimeNow();
     setTimeout((() => {
@@ -5398,6 +5432,10 @@ window.addEventListener("error", (e => {
   let stallLastCt = null, stallSince = 0, stallKicks = 0, stallKey = "";
   function stallWatch(nowMs) {
     if (!(ytPlayer && ytReady) || ytState !== 1 || !current || videoEl && document.contains(videoEl)) {
+      stallLastCt = null;
+      return;
+    }
+    if (document.hidden) {
       stallLastCt = null;
       return;
     }
@@ -5475,14 +5513,20 @@ window.addEventListener("error", (e => {
   function wakeCheck() {
     if (!current || videoEl && document.contains(videoEl)) return;
     if (ytState === 1 && ytPlayer && ytReady) {
-      progressing(1200, (ok => {
+      const noAck = () => lastSeek && lastSeek.videoId === loadedVideo && ytEventAt < lastSeek.at;
+      progressingSoon(noAck() ? 2e3 : 3500, (ok => {
         if (ok && lastSeek && lastSeek.videoId === loadedVideo && ytEventAt < lastSeek.at) {
           const ct = currentTimeNow(), el = (Date.now() - lastSeek.at) / 1e3;
           ok = ct != null && ct >= lastSeek.t - 2 && ct <= lastSeek.t + el + 4;
         }
         if (ok || document.hidden || ytState !== 1) return;
+        if (noAck()) {
+          ytAutoFixFor = "";
+          rebuildYT(loadedVideo, lastSeek.t);
+          return;
+        }
         kickYT();
-        setTimeout((() => progressing(1500, (ok2 => {
+        setTimeout((() => progressingSoon(3e3, (ok2 => {
           if (ok2 || document.hidden || !current || !loadedVideo) return;
           const fresh = lastSeek && lastSeek.videoId === loadedVideo && ytEventAt < lastSeek.at, ct = fresh ? null : currentTimeNow();
           ytAutoFixFor = "";
@@ -5898,11 +5942,13 @@ window.addEventListener("error", (e => {
     };
   } catch (e) {}
   document.addEventListener("visibilitychange", (() => {
-    if (!document.hidden) {
-      lastTick = 0;
-      tick();
-      wakeCheck();
-    }
+    if (document.hidden) return;
+    stallLastCt = null;
+    bufLastCt = null;
+    if (bufSince) bufSince = Date.now() - 4e3;
+    lastTick = 0;
+    tick();
+    wakeCheck();
   }));
   let ytState = -1;
   let autoSwitchAt = 0, resumeTries = 0;
@@ -6155,6 +6201,37 @@ window.addEventListener("error", (e => {
     }
     return pool;
   }
+  function sameSongKey(x) {
+    return String(x.title || "").toLowerCase().replace(/\s+/g, "");
+  }
+  function qKey(q) {
+    const s = db.streams.find((x => x.id === q.streamId));
+    return s && s.songs[q.i] ? sameSongKey(s.songs[q.i]) : "";
+  }
+  function spreadSameSongs(q) {
+    const n = q.length;
+    if (n < 3) return;
+    const key = q.map(qKey);
+    const okAt = (pos, k, skip) => (pos - 1 < 0 || pos - 1 === skip || key[pos - 1] !== k) && (pos + 1 >= n || pos + 1 === skip || key[pos + 1] !== k);
+    for (let pass = 0; pass < 3; pass++) {
+      let fixed = true;
+      for (let a = 1; a < n; a++) {
+        if (!key[a] || key[a] !== key[a - 1]) continue;
+        fixed = false;
+        const start = Math.floor(Math.random() * n);
+        for (let m = 0; m < n; m++) {
+          const b = (start + m) % n;
+          if (Math.abs(b - a) < 2 || key[b] === key[a]) continue;
+          if (okAt(b, key[a], a) && okAt(a, key[b], b)) {
+            [q[a], q[b]] = [ q[b], q[a] ];
+            [key[a], key[b]] = [ key[b], key[a] ];
+            break;
+          }
+        }
+      }
+      if (fixed) return;
+    }
+  }
   function playRandom() {
     if (!shuffleQueue.length) {
       if (cycleEnded) {
@@ -6172,9 +6249,14 @@ window.addEventListener("error", (e => {
         const j = Math.floor(Math.random() * (k + 1));
         [shuffleQueue[k], shuffleQueue[j]] = [ shuffleQueue[j], shuffleQueue[k] ];
       }
-      if (current && shuffleQueue.length > 1) {
-        const last = shuffleQueue[shuffleQueue.length - 1];
-        if (last.streamId === current.streamId && last.i === current.index) shuffleQueue.unshift(shuffleQueue.pop());
+      spreadSameSongs(shuffleQueue);
+      if (current && current.index >= 0 && shuffleQueue.length > 1) {
+        const cs = db.streams.find((x => x.id === current.streamId)), ck = cs && cs.songs[current.index] ? sameSongKey(cs.songs[current.index]) : "";
+        const n = shuffleQueue.length;
+        if (ck && qKey(shuffleQueue[n - 1]) === ck) {
+          const j = shuffleQueue.findIndex(((q, k) => k < n - 1 && qKey(q) !== ck && (k === 0 || qKey(shuffleQueue[k - 1]) !== ck) && (k + 1 >= n - 1 || qKey(shuffleQueue[k + 1]) !== ck) && qKey(q) !== qKey(shuffleQueue[n - 2])));
+          if (j >= 0) [shuffleQueue[n - 1], shuffleQueue[j]] = [ shuffleQueue[j], shuffleQueue[n - 1] ];
+        }
       }
     }
     const next = shuffleQueue.pop();
