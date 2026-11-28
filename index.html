@@ -5120,18 +5120,33 @@ window.addEventListener("error", (e => {
     if (ytLoading) return;
     ytLoading = true;
     window.onYouTubeIframeAPIReady = () => {
+      const pv = {
+        rel: 0,
+        playsinline: 1,
+        origin: location.origin,
+        widget_referrer: location.href
+      };
+      const first = pendingPlay ? {
+        videoId: pendingPlay.videoId
+      } : {};
+      if (pendingPlay) pv.start = Math.max(0, Math.floor(pendingPlay.t || 0));
       ytPlayer = new YT.Player("ytHost", {
         host: "https:\/\/www.youtube.com",
         width: "100%",
         height: "100%",
-        playerVars: {
-          rel: 0,
-          playsinline: 1,
-          origin: location.origin,
-          widget_referrer: location.href
-        },
+        ...first,
+        playerVars: pv,
         events: {
           onStateChange: e => {
+            if (e.data === 1) lastPlayAt = Date.now();
+            dbg("状態 " + ({
+              "-1": "未開始",
+              0: "終了",
+              1: "再生中",
+              2: "一時停止",
+              3: "読み込み中",
+              5: "待機"
+            }[e.data] || e.data) + " 位置" + Math.floor(currentTimeNow() || 0));
             ytState = e.data;
             ytEventAt = Date.now();
             if (e.data === 3) {
@@ -5145,6 +5160,7 @@ window.addEventListener("error", (e => {
               hideStuck();
             }
             setPlaying(e.data === 1 || e.data === 3);
+            if (e.data === 1) startGuard();
             if (e.data === 2) bgResume("paused");
             if (e.data === 0) onMediaEnded();
           },
@@ -5293,6 +5309,7 @@ window.addEventListener("error", (e => {
   }
   let lastSeek = null;
   function seek(videoId, t, fresh) {
+    dbg((loadedVideo === videoId && !fresh ? "同じ動画で移動 " : "動画を読み込む ") + videoId + " @" + Math.floor(t));
     hideStuck();
     lastSeek = {
       videoId: videoId,
@@ -5457,7 +5474,89 @@ window.addEventListener("error", (e => {
     stallSince = nowMs;
     kickYT();
   }
+  const DBG_KEY = "utawaku-dbg";
+  let DBG_ON = (() => {
+    try {
+      if (/[?&]nodebug\b/.test(location.search)) {
+        localStorage.removeItem(DBG_KEY + "-on");
+        return false;
+      }
+      if (/[?&]debug\b/.test(location.search)) localStorage.setItem(DBG_KEY + "-on", "1");
+      return localStorage.getItem(DBG_KEY + "-on") === "1";
+    } catch (e) {
+      return false;
+    }
+  })();
+  function dbg(msg) {
+    if (!DBG_ON) return;
+    try {
+      const d = new Date, hh = n => String(n).padStart(2, "0");
+      const line = `${hh(d.getHours())}:${hh(d.getMinutes())}:${hh(d.getSeconds())} ${document.hidden ? "[裏]" : "[表]"} ${msg}`;
+      const a = JSON.parse(localStorage.getItem(DBG_KEY) || "[]");
+      a.push(line);
+      while (a.length > 300) a.shift();
+      localStorage.setItem(DBG_KEY, JSON.stringify(a));
+    } catch (e) {}
+  }
+  let dbgBtn = null;
+  function dbgButton() {
+    if (dbgBtn) return;
+    const b = document.createElement("button");
+    dbgBtn = b;
+    b.type = "button";
+    b.textContent = "記録";
+    b.className = "btn";
+    b.style.cssText = "position:fixed;right:10px;bottom:calc(var(--bar-h, 0px) + 80px);z-index:9999;font-size:12px;padding:6px 12px;opacity:.85";
+    b.addEventListener("click", (() => {
+      let a = [];
+      try {
+        a = JSON.parse(localStorage.getItem(DBG_KEY) || "[]");
+      } catch (e) {}
+      const txt = a.join("\n") || "（まだ記録がありません）";
+      const d = document.createElement("dialog");
+      d.className = "dlg-wrap";
+      d.innerHTML = `<form class="dlg" method="dialog" style="max-width:min(92vw,640px)"><h2>再生の記録</h2><textarea readonly style="width:100%;height:50vh;font-size:11px;font-family:monospace"></textarea><div class="dlg-foot"><button type="button" class="btn" data-dbg-copy>コピー</button><button type="button" class="btn" data-dbg-clear>消す</button><button class="btn" value="close">閉じる</button></div></form>`;
+      d.querySelector("textarea").value = txt;
+      d.querySelector("[data-dbg-copy]").addEventListener("click", (() => {
+        try {
+          navigator.clipboard.writeText(txt);
+          toast("コピーしました");
+        } catch (e) {}
+      }));
+      d.querySelector("[data-dbg-clear]").addEventListener("click", (() => {
+        try {
+          localStorage.removeItem(DBG_KEY);
+        } catch (e) {}
+        d.close();
+      }));
+      d.addEventListener("close", (() => d.remove()));
+      document.body.appendChild(d);
+      d.showModal();
+    }));
+    document.body.appendChild(b);
+  }
+  if (DBG_ON) dbgButton();
+  try {
+    google.script.url.getLocation((loc => {
+      const p = loc && loc.parameter || {};
+      try {
+        if ("nodebug" in p) {
+          localStorage.removeItem(DBG_KEY + "-on");
+          DBG_ON = false;
+          if (dbgBtn) {
+            dbgBtn.remove();
+            dbgBtn = null;
+          }
+        } else if ("debug" in p) {
+          localStorage.setItem(DBG_KEY + "-on", "1");
+          DBG_ON = true;
+          dbgButton();
+        }
+      } catch (e) {}
+    }));
+  } catch (e) {}
   function kickYT() {
+    dbg("一時停止→再生");
     try {
       ytPlayer.pauseVideo();
     } catch (e) {}
@@ -5467,7 +5566,30 @@ window.addEventListener("error", (e => {
       } catch (e) {}
     }), 350);
   }
+  let startGuardFor = 0;
+  function startGuard() {
+    if (!lastSeek || !ytPlayer || loadedVideo !== lastSeek.videoId || Date.now() - lastSeek.at > 3e4 || startGuardFor === lastSeek.at) return;
+    const t = lastSeek.t;
+    if (!(t > 3)) {
+      startGuardFor = lastSeek.at;
+      return;
+    }
+    setTimeout((() => {
+      if (!lastSeek || startGuardFor === lastSeek.at || loadedVideo !== lastSeek.videoId) return;
+      const ct = currentTimeNow();
+      if (ct == null) return;
+      if (lastSeek.ct0 != null && Math.abs(ct - lastSeek.ct0) < .2) return;
+      startGuardFor = lastSeek.at;
+      if (ct < 5 && ct < t - 3) {
+        dbg("最初から始まったので " + t + " へ");
+        try {
+          ytPlayer.seekTo(t, true);
+        } catch (e) {}
+      }
+    }), 400);
+  }
   function rebuildYT(videoId, t) {
+    dbg("プレイヤーを作り直す @" + Math.floor(t));
     ytRebuilds++;
     destroyPlayer();
     $("screen").innerHTML = `<div id="ytHost"></div>`;
@@ -5487,6 +5609,7 @@ window.addEventListener("error", (e => {
   }
   let bgFixKey = "", bgFixStep = 0;
   function bgFix(videoId, t) {
+    dbg("固まり対策(裏)");
     const key = videoId + "@" + t;
     if (bgFixKey !== key) {
       bgFixKey = key;
@@ -5511,6 +5634,7 @@ window.addEventListener("error", (e => {
     }
   }
   function wakeCheck() {
+    dbg("画面に戻った 状態" + ytState);
     if (!current || videoEl && document.contains(videoEl)) return;
     if (ytState === 1 && ytPlayer && ytReady) {
       const noAck = () => lastSeek && lastSeek.videoId === loadedVideo && ytEventAt < lastSeek.at;
@@ -5537,7 +5661,7 @@ window.addEventListener("error", (e => {
     }
     if (!autoSwitchAt || !lastSeek) return;
     if (ytState === 3 || ytState === 0) return;
-    if (ytState === 2 && resumeTries < 2) return;
+    if (ytState === 2 && resumeTries < 6 && !(lastSeek && autoSwitchAt && Math.abs(lastSeek.at - autoSwitchAt) < 3e3)) return;
     const {videoId: videoId, t: t} = lastSeek;
     if (!(ytPlayer && ytReady)) {
       ytAutoFixFor = videoId + "@" + t;
@@ -5574,6 +5698,7 @@ window.addEventListener("error", (e => {
     if (i >= 0 ? !canPlaySong(s, i) : !(s.sample || canPlayStream(s))) return;
     autoSwitchAt = document.hidden ? Date.now() : 0;
     resumeTries = 0;
+    resumeChain = 0;
     $("player").classList.remove("idle");
     const idx = i < 0 ? -1 : i;
     current = {
@@ -5879,11 +6004,13 @@ window.addEventListener("error", (e => {
   function tick() {
     const nowMs = Date.now();
     if (nowMs - lastTick < 500) return;
+    if (lastTick && nowMs - lastTick > 5e3 && current) dbg("見張りが " + Math.round((nowMs - lastTick) / 1e3) + "秒止まっていた");
     lastTick = nowMs;
     if (!current) return;
     unstickBuffering(nowMs);
     stallWatch(nowMs);
     if (document.hidden && autoSwitchAt && nowMs - autoSwitchAt > 5e3 && (ytState === -1 || ytState === 5)) bgResume("stuck");
+    bgLoadKick(nowMs);
     const s = db.streams.find((x => x.id === current.streamId));
     if (!s || s.sample) return;
     const t = currentTimeNow();
@@ -5952,18 +6079,38 @@ window.addEventListener("error", (e => {
   }));
   let ytState = -1;
   let autoSwitchAt = 0, resumeTries = 0;
+  let resumeChain = 0;
   function bgResume(reason) {
-    if (!document.hidden || !autoSwitchAt || Date.now() - autoSwitchAt > 9e4 || resumeTries >= 2) return;
+    if (!document.hidden || !autoSwitchAt || Date.now() - autoSwitchAt > 9e4 || resumeTries >= 6) return;
     if (!(ytPlayer && ytReady)) return;
-    resumeTries++;
-    setTimeout((() => {
-      if (!document.hidden || !(ytPlayer && ytReady)) return;
-      if (ytState === 2 || ytState === -1 || ytState === 5) {
-        try {
-          ytPlayer.playVideo();
-        } catch (e) {}
+    if (reason === "paused" && !(lastSeek && Date.now() - lastSeek.at < 8e3)) return;
+    if (resumeChain) return;
+    dbg("再開を試す(" + reason + ")");
+    const delays = [ 400, 1500, 4e3, 9e3, 18e3, 3e4 ];
+    const chain = ++resumeChain > 1e9 ? resumeChain = 1 : resumeChain;
+    const step = () => {
+      if (resumeChain !== chain) return;
+      if (!document.hidden || !(ytPlayer && ytReady) || !current || ytState === 1 || ytState === 3 || ytState === 0 || resumeTries >= 6) {
+        resumeChain = 0;
+        return;
       }
-    }), reason === "paused" ? 400 : 0);
+      const n = resumeTries++;
+      try {
+        if (n < 2 || !lastSeek || loadedVideo !== lastSeek.videoId) {
+          dbg("再生の指示 " + (n + 1) + "回目");
+          ytPlayer.playVideo();
+        } else {
+          const ct = currentTimeNow(), at = ytState === 2 && ct != null && ct > 0 ? Math.floor(ct) : lastSeek.t;
+          dbg("読み込み直し " + (n + 1) + "回目 @" + at);
+          ytPlayer.loadVideoById({
+            videoId: lastSeek.videoId,
+            startSeconds: at
+          });
+        }
+      } catch (e) {}
+      if (resumeTries < delays.length) setTimeout(step, delays[resumeTries] - delays[resumeTries - 1]); else resumeChain = 0;
+    };
+    setTimeout(step, delays[0]);
   }
   function mediaPlaying() {
     if (videoEl && document.contains(videoEl)) return !videoEl.paused && !videoEl.seeking && videoEl.readyState >= 3;
@@ -6076,7 +6223,29 @@ window.addEventListener("error", (e => {
     setShuffle(false);
     toast(msg);
   }
+  let lastPlayAt = 0, loadKickFor = 0, loadKicks = 0;
+  function bgLoadKick(nowMs) {
+    if (!touchDevice || !document.hidden || !autoSwitchAt || !lastSeek || !(ytPlayer && ytReady)) return;
+    if (loadKickFor !== lastSeek.at) {
+      loadKickFor = lastSeek.at;
+      loadKicks = 0;
+    }
+    if (lastPlayAt >= lastSeek.at) return;
+    if (ytState === 1 || ytState === 2 || ytState === 0) return;
+    const since = nowMs - lastSeek.at;
+    if (loadKicks >= 2 || since < (loadKicks ? 9e3 : 4e3) || since > 6e4) return;
+    loadKicks++;
+    dbg("鳴り始めないので早めに読み込み直す " + loadKicks + "回目");
+    try {
+      ytPlayer.loadVideoById({
+        videoId: lastSeek.videoId,
+        startSeconds: lastSeek.t
+      });
+      loadedVideo = lastSeek.videoId;
+    } catch (e) {}
+  }
   function advance() {
+    dbg("次の曲へ");
     if (shuffle) playRandom(); else playSeq(1);
   }
   function setMode(mode) {
@@ -6372,6 +6541,7 @@ window.addEventListener("error", (e => {
     n: 0
   };
   function onYTError(code) {
+    dbg("エラー " + code);
     const s = current && db.streams.find((x => x.id === current.streamId));
     let t = null;
     try {
